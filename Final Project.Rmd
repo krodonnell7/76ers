@@ -1,0 +1,1182 @@
+---
+title: "Final Project"
+author: "Kevin O'Donnell"
+date: "2023-04-18"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(hoopR)
+library(nbastatR)
+library(rvest)
+library(xml2)
+```
+
+# Extra Stuff to Maybe Use
+```{r}
+#basic stats + shooting splits by distance
+#loop through for past decade
+#team_stats <- bref_teams_stats(seasons = 2023)
+
+#team_ids <- team_stats[[2]][[1]]$idTeamNBA
+
+#team_stats <- teams_tables(team_ids = team_ids, seasons = 2023, tables="splits", season_types = "Regular Season", measures = c("Base", "Advanced", "Defense"), modes = "Per48")
+
+#basic stats
+#team_stats <- teams_annual_stats(team_ids = team_ids, season_types = "Regular Season", modes = c("PerGame"))
+
+```
+
+
+# Importing Team, Player, and Salary Data
+```{r}
+#use this for team and players
+#parse and recombine
+all_stats <- teams_players_stats(seasons = 2013:2022, types = c("player", "team"), tables = c("general"), season_types = "Regular Season", measures = c("Base", "Advanced"), modes = "Per48")
+
+basic_player <- data.frame()
+j <- 2013
+for (i in 1:10) {
+  all_stats[[7]][[i]] <- all_stats[[7]][[i]] %>%
+    mutate(yearSeason = j)
+  basic_player <- rbind(basic_player, all_stats[[7]][[i]])
+  j <- j+1
+}
+
+adv_player <- data.frame()
+j <- 2013
+for (i in 21:30) {
+  all_stats[[7]][[i]] <- all_stats[[7]][[i]] %>%
+    mutate(yearSeason = j)
+  adv_player <- rbind(adv_player, all_stats[[7]][[i]])
+  j <- j+1
+}
+
+more_adv_player <- bref_players_stats(seasons = 2013:2022, tables = c("advanced"))
+more_adv_player <- more_adv_player %>%
+  select(namePlayer, yearSeason, groupPosition, slugPosition, ratioPER, pctTOV, ratioOWS, ratioDWS, ratioWS, ratioOBPM:ratioVORP)
+
+
+basic_team <- data.frame()
+j <- 2013
+for (i in 11:20) {
+  all_stats[[7]][[i]] <- all_stats[[7]][[i]] %>%
+    mutate(yearSeason = j)
+  basic_team <- rbind(basic_team, all_stats[[7]][[i]])
+  j <- j+1
+}
+
+adv_team <- data.frame()
+j <- 2013
+for (i in 31:40) {
+  all_stats[[7]][[i]] <- all_stats[[7]][[i]] %>%
+    mutate(yearSeason = j)
+  adv_team <- rbind(adv_team, all_stats[[7]][[i]])
+  j <- j+1
+}
+
+#select only relevant columns
+basic_player <- basic_player %>%
+  select(typeMeasure, namePlayer:fptsNBAActual, rankFTM:fptsRank, yearSeason)
+
+adv_player <- adv_player %>%
+  select(typeMeasure, namePlayer, pctAST:pctFG, pctASTRank:pctUSGRank, ortgE:ortg, drtgE:drtg, netrtgE:netrtg, ratioASTtoTO:pace, ratioPIE, rankORTGE:ortgRank, rankDRTGE:drtgRank, rankNTRGE:netrtgRank, ratioASTtoTORank:yearSeason)
+
+basic_team <- basic_team %>%
+  select(typeMeasure, nameTeam:yearSeason)
+
+adv_team <- adv_team %>%
+  select(typeMeasure, nameTeam, pctAST:pctTS, pctASTRank:pctTSRank, ortgE:pace, ratioPIE, ortgRank:yearSeason)
+
+#combining 
+all_player <- left_join(basic_player, adv_player, by=c("namePlayer", "yearSeason"))
+all_player <- left_join(all_player, more_adv_player, by=c("namePlayer", "yearSeason"))
+all_player <- all_player %>%
+  select(yearSeason, namePlayer, everything())
+
+all_team <- left_join(basic_team, adv_team, by=c("nameTeam", "yearSeason"))
+all_team <- all_team %>%
+  select(yearSeason, nameTeam, everything())
+
+
+#salary data
+
+#salaries from 2013-2022
+all_salary <- data.frame()
+for (i in 2012:2021) {
+  webpage <- read_html(paste("https://hoopshype.com/salaries/players/", i, "-", i+1, "/", sep = ""))
+
+  salary_i <- webpage %>%
+    html_table() %>%
+    .[[1]] %>%
+    setNames(.[1, ]) %>% #Since column names are in 1st row
+    slice(-1) %>%        #Remove 1st row
+    select(-1) %>%   #Remove 1st column
+    rename("namePlayer" = Player)
+  
+  colnames(salary_i)[2] = "Salary"
+  
+  salary_i <- salary_i %>%
+    mutate(yearSeason = i+1) %>%
+    select(namePlayer, Salary, yearSeason)
+  
+  all_salary <- rbind(all_salary, salary_i)
+}
+
+all_salary <- all_salary %>%
+  mutate(Salary = (substr(Salary, 2, nchar(Salary))))
+
+all_salary$Salary <- as.numeric(gsub(",","", all_salary$Salary))
+
+player_salary <- left_join(all_player, all_salary, by=c("namePlayer", "yearSeason"))
+
+player_salary <- player_salary %>% filter(!is.na(Salary))
+```
+
+# Exploring Correlations for Team KPI selection
+```{r}
+cors <- c()
+names <- c()
+y <- all_team %>% select(pctWins)
+for (i in 7:92) {
+  x <- all_team[,i]
+  names[i-6] <- names(x)
+  cors[i-6] <- try(cor(x,y, use="complete.obs"))
+}
+cors <- cors[-54]
+names <- names[-54]
+cors_df <- data.frame(names, cors = as.numeric(cors))
+cors_df <- cors_df %>% arrange(-abs(cors)) %>% rename("Variable" = names, "Correlation with Win %" = cors)
+cors_df$`Correlation with Win %` <- round(cors_df$`Correlation with Win %`, digit = 5)
+
+
+
+all_team <- all_team %>%
+  mutate(FTrate = ftm/fga)
+cor(all_team$FTrate, all_team$pctWins)
+
+# four factors
+# Shooting (40%) - pctEFG (not highest correlation but more comprehensive than FG%)
+# Turnovers (25%) - tov
+# Rebounding (20%) - TREB pct
+# Free Throws (15%) - FT pct
+
+# plots for each vs win pct
+all_team %>% 
+  ggplot(aes(pctEFG, pctWins)) +
+  geom_point()
+
+all_team %>% 
+  ggplot(aes(tov, pctWins)) +
+  geom_point()
+
+all_team %>% 
+  ggplot(aes(pctTREB, pctWins)) +
+  geom_point()
+
+all_team %>% 
+  ggplot(aes(pctFT, pctWins)) +
+  geom_point()
+
+
+# creating four factor score 
+team_scores <- all_team %>%
+  group_by(yearSeason) %>%
+  mutate(pctEFG_score = pnorm(pctEFG, mean = mean(pctEFG), sd = sd(pctFG)),
+         tov_score = pnorm(tov, mean = mean(tov), sd = sd(tov)),
+         pctTREB_score = pnorm(pctTREB, mean = mean(pctTREB), sd = sd(pctTREB)),
+         pctFT_score = pnorm(pctFT, mean = mean(pctFT), sd = sd(pctFT)))
+
+# weights
+w1 <- .4
+w2 <- .25
+w3 <- .2
+w4 <- .15
+
+team_scores <- team_scores %>%
+  mutate(Avg_Score = w1 * pctEFG_score + w2 * tov_score + 
+           w3 * pctTREB_score + w4 * pctFT_score)
+
+#strong correlation
+cor(team_scores$Avg_Score, team_scores$pctWins)
+
+team_scores %>% 
+  #mutate(selected_team = ifelse(nameTeam=="Philadelphia 76ers", 0.9, 0.3)) %>% 
+  ggplot(aes(Avg_Score, pctWins)) +
+  geom_point() +
+  geom_vline(xintercept = mean(team_scores$Avg_Score), color="red", linetype="dashed") +
+  geom_hline(yintercept = mean(team_scores$pctWins), color="red", linetype="dashed") +
+  scale_colour_gradient(low = "white", high = "red") +
+  #geom_point(aes(alpha = selected_team, color = selected_team), size = 1.5, show.legend = F) +
+  geom_smooth(method = "lm", se=F) +
+  labs(
+    x = "Four Factor Score",
+    y = "Winning Percentage",
+    title = "Winning Percentage vs Four Factor Score",
+    subtitle = "2012-13 Season through 2021-22 Season") +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "panel"
+  ) 
+
+
+
+#also suggest looking at offensive and defensive rating as overall barometer for how the team is performing
+#maybe rolling average for 2023 and animate it?
+all_team %>% 
+  ggplot(aes(ortg, pctWins)) +
+  geom_point()
+
+all_team %>% 
+  ggplot(aes(drtg, pctWins)) +
+  geom_point()
+
+
+cors_df %>%
+  filter(grepl("tov", Variable)==T | grepl("TOV", Variable)==T) %>%
+  gt::gt()
+
+cors_df %>%
+  filter(grepl("reb", Variable)==T | grepl("REB", Variable)==T) %>%
+  gt::gt()
+
+cors_df %>%
+  filter(grepl("ft", Variable)==T | grepl("FT", Variable)==T) %>%
+  gt::gt()
+
+all_team %>%
+  group_by(yearSeason) %>%
+  summarise(yearSeason, mean_fg3a = mean(fg3a)) %>%
+  ggplot(aes(yearSeason, mean_fg3a)) +
+  geom_line() +
+  labs(
+    x = "Season",
+    y = "Average 3 Pointers Attempted / 48 Minutes",
+    title = "3 Point Shooting Tendencies",
+    subtitle = "2012-13 Season through 2021-22 Season") +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "panel"
+  ) +
+  scale_x_continuous(breaks = 2013:2022)
+
+all_team %>%
+  filter(yearSeason > 2019) %>%
+  summarise(cor(pctEFG, pctWins, use="complete.obs"),
+            cor(pctTS, pctWins, use="complete.obs"),
+            cor(pctFG, pctWins, use="complete.obs"))
+
+all_team %>%
+  filter(nameTeam=="Philadelphia 76ers") %>%
+  group_by(yearSeason) %>%
+  summarise(pctWins) %>% rbind(all_team_2023 %>%
+  filter(nameTeam=="Philadelphia 76ers") %>%
+  group_by(yearSeason) %>%
+  summarise(pctWins))
+
+
+```
+
+# selecting player KPIs
+```{r}
+cor(player_salary$pctEFG, player_salary$ratioVORP, use="complete.obs")
+
+#4 factor approach for players: related each to VORP to get weight for each for G, F, C
+player_salary %>%
+  filter(!is.na(groupPosition)) %>%
+  group_by(groupPosition) %>%
+  summarise(efg = cor(pctEFG, ratioVORP, use="complete.obs"),
+            tov = cor(tov, ratioVORP, use="complete.obs"),
+            treb = cor(pctTREB, ratioVORP, use="complete.obs"),
+            ft = cor(pctFT, ratioVORP, use="complete.obs"),
+            tot = efg+tov+treb+ft,
+            efg = efg/tot,
+            tov = tov/tot,
+            treb = treb/tot,
+            ft = ft/tot)
+
+#defensive stats
+#maybe just add fg pct allowed at the rim for centers
+#look at steals for guards
+centers_defense <- teams_players_stats(seasons = 2013:2022, types = c("player"), tables = c("defense"), season_types = "Regular Season", measures = c("Base", "Advanced"), modes = "PerGame", defenses = "Less Than 6Ft", players_positions = "C")
+
+centers_defense_full <- data.frame()
+j <- 2014
+for (i in 1:9) {
+  centers_defense[[7]][[i]] <- centers_defense[[7]][[i]] %>%
+    mutate(yearSeason = j)
+  centers_defense_full <- rbind(centers_defense_full, centers_defense[[7]][[i]])
+  j <- j+1
+}
+
+centers_defense_full <- centers_defense_full %>%
+  dplyr::select(namePlayer, slugTeam, yearSeason, LT_06_PCT)
+
+centers_defense_full <- left_join(centers_defense_full, player_salary, by=c("namePlayer", "yearSeason"))
+
+#which stats correlate best to defensive win shares?
+cor(player_salary$ratioDWS, player_salary$stl, use="complete.obs")
+cor(player_salary$ratioDWS, player_salary$blk, use="complete.obs")
+cor(player_salary$ratioDWS, player_salary$pctDREB, use="complete.obs")
+cor(player_salary$ratioDWS, player_salary$pf, use="complete.obs")
+
+#specifically for centers
+cor(centers_defense_full$ratioDWS, centers_defense_full$LT_06_PCT, use="complete.obs")
+cor(centers_defense_full$ratioDWS, centers_defense_full$blk, use="complete.obs")
+
+
+#getting specific defensive stats for all positions
+#choose metrics to factor into defensive portion of player score
+defense <- teams_players_stats(seasons = 2013:2022, types = c("player"), tables = c("defense"), season_types = "Regular Season", measures = c("Base", "Advanced"), modes = "PerGame", defenses = c("3 Pointers", "Less Than 6Ft"))
+
+defense_3pt <- data.frame()
+j <- 2014
+for (i in 1:9) {
+  defense[[7]][[i]] <- defense[[7]][[i]] %>%
+    mutate(yearSeason = j)
+  defense_3pt <- rbind(defense_3pt, defense[[7]][[i]])
+  j <- j+1
+}
+
+defense_LT6 <- data.frame()
+j <- 2014
+for (i in 19:27) {
+  defense[[7]][[i]] <- defense[[7]][[i]] %>%
+    mutate(yearSeason = j)
+  defense_LT6 <- rbind(defense_LT6, defense[[7]][[i]])
+  j <- j+1
+}
+
+defense_3pt <- defense_3pt %>%
+  dplyr::select(namePlayer, yearSeason, pctFG3)
+defense_LT6 <- defense_LT6 %>%
+  dplyr::select(namePlayer, yearSeason, LT_06_PCT)
+defense_full <- left_join(defense_LT6, defense_3pt, by=c("namePlayer", "yearSeason"))
+
+defense_full <- left_join(defense_full, player_salary, by=c("namePlayer", "yearSeason"))
+
+#getting correlations for def score based on percentile values --> weights by position
+defense_full %>%
+  filter(!is.na(groupPosition), !is.na(pctFG3.x)) %>%
+  mutate(LT6_norm = pnorm(LT_06_PCT, mean = mean(LT_06_PCT), sd = sd(LT_06_PCT)),
+            pctFG3_norm = pnorm(pctFG3.x, mean = mean(pctFG3.x), sd = sd(pctFG3.x)),
+            stl_norm = pnorm(pctDREB, mean = mean(pctDREB), sd = sd(pctDREB)),
+            blk_norm = pnorm(blk, mean = mean(blk), sd = sd(blk))) %>%
+  group_by(groupPosition) %>%
+  summarise(LT6 = cor(LT6_norm, ratioDWS, use="complete.obs"),
+            pctFG3 = cor(pctFG3_norm, ratioDWS, use="complete.obs"),
+            stl = cor(stl_norm, ratioDWS, use="complete.obs"),
+            blk = cor(blk_norm, ratioDWS, use="complete.obs"),
+            def_total = sum(abs(LT6), abs(pctFG3), stl, blk),
+            LT6_weight = abs(LT6)/def_total,
+            pctFG3_weight = abs(pctFG3)/def_total,
+            stl_weight = stl/def_total,
+            blk_weight = blk/def_total)
+
+#getting correlations for off score based on percentile values --> weights by position
+defense_full %>%
+  filter(!is.na(groupPosition)) %>%
+  mutate(EFG_norm = pnorm(pts, mean = mean(pts), sd = sd(pts)),
+            tov_norm = pnorm(tov, mean = mean(tov), sd = sd(tov)),
+            pct_treb_norm = pnorm(pctOREB, mean = mean(pctOREB), sd = sd(pctOREB)),
+            FT_norm = pnorm(pctFT, mean = mean(pctFT), sd = sd(pctFT))) %>%
+  group_by(groupPosition) %>%
+  summarise(EFG = cor(EFG_norm, ratioOBPM, use="complete.obs"),
+            tov = cor(tov_norm, ratioOBPM, use="complete.obs"),
+            pct_treb = cor(pct_treb_norm, ratioOBPM, use="complete.obs"),
+            FT = cor(FT_norm, ratioOBPM, use="complete.obs"),
+            off_total = sum(abs(EFG), abs(tov), abs(pct_treb), abs(FT)),
+            EFG_weight = abs(EFG)/off_total,
+            tov_weight = abs(tov)/off_total,
+            pct_treb_weight = abs(pct_treb)/off_total,
+            FT_weight = abs(FT)/off_total)
+
+defense_centers <- defense_full %>%
+  filter(!is.na(groupPosition), !is.na(pctFG3.x)) %>%
+  filter(groupPosition == "C") %>%
+  mutate(EFG_norm = pnorm(pts, mean = mean(pts), sd = sd(pts)),
+            tov_norm = 1- pnorm(tov, mean = mean(tov), sd = sd(tov)),
+            pct_treb_norm = pnorm(pctOREB, mean = mean(pctOREB), sd = sd(pctOREB)),
+            FT_norm = pnorm(pctFT, mean = mean(pctFT), sd = sd(pctFT))) %>%
+  mutate(LT6_norm = 1- pnorm(LT_06_PCT, mean = mean(LT_06_PCT), sd = sd(LT_06_PCT)),
+            pctFG3_norm = 1- pnorm(pctFG3.x, mean = mean(pctFG3.x), sd = sd(pctFG3.x)),
+            stl_norm = pnorm(stl, mean = mean(stl), sd = sd(stl)),
+            blk_norm = pnorm(blk, mean = mean(blk), sd = sd(blk)))
+
+defense_forwards <- defense_full %>%
+  filter(!is.na(groupPosition), !is.na(pctFG3.x)) %>%
+  filter(groupPosition == "F") %>%
+  mutate(EFG_norm = pnorm(pts, mean = mean(pts), sd = sd(pts)),
+            tov_norm = 1- pnorm(tov, mean = mean(tov), sd = sd(tov)),
+            pct_treb_norm = pnorm(pctOREB, mean = mean(pctOREB), sd = sd(pctOREB)),
+            FT_norm = pnorm(pctFT, mean = mean(pctFT), sd = sd(pctFT))) %>%
+  mutate(LT6_norm = 1- pnorm(LT_06_PCT, mean = mean(LT_06_PCT), sd = sd(LT_06_PCT)),
+            pctFG3_norm = 1- pnorm(pctFG3.x, mean = mean(pctFG3.x), sd = sd(pctFG3.x)),
+            stl_norm = pnorm(stl, mean = mean(stl), sd = sd(stl)),
+            blk_norm = pnorm(blk, mean = mean(blk), sd = sd(blk)))
+
+defense_guard<- defense_full %>%
+  filter(!is.na(groupPosition), !is.na(pctFG3.x)) %>%
+  filter(groupPosition == "G") %>%
+  mutate(EFG_norm = pnorm(pts, mean = mean(pts), sd = sd(pts)),
+            tov_norm = 1- pnorm(tov, mean = mean(tov), sd = sd(tov)),
+            pct_treb_norm = pnorm(pctOREB, mean = mean(pctOREB), sd = sd(pctOREB)),
+            FT_norm = pnorm(pctFT, mean = mean(pctFT), sd = sd(pctFT))) %>%
+  mutate(LT6_norm = 1- pnorm(LT_06_PCT, mean = mean(LT_06_PCT), sd = sd(LT_06_PCT)),
+            pctFG3_norm = 1- pnorm(pctFG3.x, mean = mean(pctFG3.x), sd = sd(pctFG3.x)),
+            stl_norm = pnorm(stl, mean = mean(stl), sd = sd(stl)),
+            blk_norm = pnorm(blk, mean = mean(blk), sd = sd(blk)))
+
+defense_full <- rbind(defense_centers, defense_forwards, defense_guard)
+
+defense_full <- defense_full %>%
+  ungroup() %>%
+  mutate(off_score = case_when(groupPosition == "C" ~ 0.5855200 * EFG_norm + 0.04441004*tov_norm + 0.12891885*pct_treb_norm + 0.2411511*FT_norm,
+                               groupPosition == "F" ~ 0.6059645 * EFG_norm + 0.01934863*tov_norm + 0.07662662*pct_treb_norm + 0.2980602*FT_norm,
+                               groupPosition == "G" ~ 0.5410904 * EFG_norm + 0.11505038*tov_norm + 0.04282659*pct_treb_norm + 0.3010326*FT_norm),
+         
+         def_score = case_when(groupPosition == "C" ~ 0.4334391 * LT6_norm + 0.1255157*pctFG3_norm +  0.4410451*blk_norm,
+                               groupPosition == "F" ~ 0.1820329 * LT6_norm + 0.08735832*pctFG3_norm + 0.4517835*stl_norm + 0.2788252*blk_norm,
+                               groupPosition == "G" ~ 0.1525250 * LT6_norm + 0.06109497*pctFG3_norm + 0.5000073*stl_norm + 0.2863728*blk_norm),
+         
+         player_score = off_score + def_score,
+         off_score_usg = off_score*pctUSG,
+         def_score_usg = def_score*minutes,
+         player_score_usg = off_score_usg + def_score_usg)
+
+defense_full %>%
+  filter(groupPosition == "C", minutes > 1094.9800000) %>%
+  arrange(-player_score) %>%
+  dplyr::select(namePlayer, yearSeason, minutes, EFG_norm:player_score_usg) 
+
+defense_full %>%
+  filter(groupPosition == "F", minutes > 1094.9800000) %>%
+  arrange(-player_score) %>%
+  dplyr::select(namePlayer, yearSeason,player_score, off_score, def_score)
+```
+```{r}
+#def score weights for centers only
+0.2684753/(0.2684753+0.07774535+0.2731865) #LT6
+0.07774535/(0.2684753+0.07774535+0.2731865) #3 pt
+0.2731865/(0.2684753+0.07774535+0.2731865) #blk
+
+cor(defense_full$off_score, defense_full$ratioOBPM)
+```
+
+
+# Predicting Overall Performance w/ Salary
+```{r}
+# predicing VORP (highest correlation with MVP award share of the holistic advanced metrics)
+player_salary %>%
+  ggplot(aes(ratioVORP, Salary)) +
+  geom_point()
+
+cor(player_salary$ratioVORP, player_salary$Salary, use="complete.obs")
+
+salary_model <- lm(data = player_salary, Salary ~ ratioVORP)
+summary(salary_model)
+
+
+#forward and backward selection
+library(MASS)
+player_salary_for_model <- player_salary %>% na.omit()
+empty_model <- lm(data = player_salary_for_model, Salary ~ 1)
+
+formula = as.formula(paste("Salary ~ ", paste(colnames(player_salary_for_model)[c(1, 10:16, 27:29, 34:47, 65:73, 89, 91, 93:95, 97:98, 115:123)], collapse = " + ")))
+full_model <- lm(data = player_salary_for_model, formula)
+
+summary(full_model)
+
+stepAIC(empty_model, scope = list(lower=empty_model, upper=full_model), direction = "forward")
+
+forward_select_model <- lm(formula = Salary ~ ratioVORP + agePlayer + pctUSG + 
+    minutes + gp + ftm + 
+    pctTS + pctTOV + blk +
+    ortg + drtg + fg2a + fg3m + 
+    pfd + fta + pctTREB, data = player_salary_for_model)
+
+forward_select_model <- lm(formula = Salary ~ ratioVORP + pts + stl + pctTREB + 
+    ortg + drtg + ast + pctTS + pctTOV + 
+    ftm + fg3m, data = defense_full)
+
+model_equation <- function(model, ...) {
+  format_args <- list(...)
+  
+  model_coeff <- model$coefficients
+  format_args$x <- abs(model$coefficients)
+  model_coeff_sign <- sign(model_coeff)
+  model_coeff_prefix <- case_when(model_coeff_sign == -1 ~ " - ",
+                                  model_coeff_sign == 1 ~ " + ",
+                                  model_coeff_sign == 0 ~ " + ")
+  model_eqn <- paste(strsplit(as.character(model$call$formula), "~")[[2]], # 'y'
+                     "=",
+                     paste(if_else(model_coeff[1]<0, "- ", ""),
+                           do.call(format, format_args)[1],
+                           paste(model_coeff_prefix[-1],
+                                 do.call(format, format_args)[-1],
+                                 " * ",
+                                 names(model_coeff[-1]),
+                                 sep = "", collapse = ""),
+                           sep = ""))
+  return(model_eqn)
+}
+
+model_equation(forward_select_model)
+
+plot(forward_select_model)
+
+#XGBoost model
+library(caret)
+
+set.seed(1)
+#XGBoost for pts, point spread, pace, pts per possession
+tune_grid <- expand.grid(
+  nrounds = seq(from = 200, to = 400, by = 100),
+  eta = c(0.05, 0.1, 0.3),
+  max_depth = 4:6,
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+tune_control <- caret::trainControl(
+  method = "cv", # cross-validation
+  number = 3, # with n folds 
+  verboseIter = TRUE, # no training log
+  allowParallel = FALSE # FALSE for reproducible results 
+)
+
+salary_xgboost <- defense_full %>%
+  caret::train(
+  Salary ~ ratioVORP + pts + stl + pctTREB + 
+    ortg + drtg + ast + pctTS + pctTOV + 
+    ftm + fg3m,
+  data = .,
+  trControl = tune_control,
+  tuneGrid = tune_grid,
+  method = "xgbTree",
+  verbose = FALSE
+)
+
+imp <- varImp(salary_xgboost, scale = F)
+
+ggplot(imp, mapping=NULL, top=12) +
+  labs(title = "XGBoost Feature Importance") +
+  theme(plot.title = element_text(hjust = 0.5, color = "Purple"), plot.subtitle = element_text(hjust = 0.5, color = "Salmon")) +
+  scale_y_discrete(labels = c("VORP"))
+
+importance <- imp[["importance"]][["Overall"]]
+variable_names = c("VORP", "PTS", "ORTG", "AST","TREB%", "TS%", "DRTG", "FTM", "FG3M", "TOV%", "STL")
+imp <- data.frame(variable_names, importance)
+
+ggplot(imp, mapping=aes(importance,reorder(variable_names, importance))) +
+  geom_col() +
+  labs(title = "XGBoost Feature Importance",
+       x="Feature Importance",
+       y="Features") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, color = "Blue"), plot.subtitle = element_text(hjust = 0.5, color = "Salmon")) 
+  
+  
+salary_xgboost$bestTune
+salary_xgboost$results
+
+sqrt(mean(forward_select_model$residuals^2))
+
+
+player_salary_2023 %>%
+  add_predictions(forward_select_model) %>%
+  ggplot(aes(Salary, pred)) +
+  geom_point() +
+  geom_abline(slope=1, linetype="dashed", color="red") +
+  labs(title = "Predicted vs Actual Salary Values",
+       subtitle = "2012-13 Season through 2021-22 Season",
+       y="Predicted Salary")
+
+player_salary %>%
+  filter(!is.na(ratioVORP)) %>%
+  add_predictions(salary_xgboost) %>%
+  ggplot(aes(Salary, pred)) +
+  geom_point() +
+  geom_abline(slope=1, linetype="dashed", color="red") +
+  labs(title = "Predicted vs Actual Salary Values",
+       subtitle = "2012-13 Season through 2021-22 Season",
+       y="Predicted Salary")
+```
+
+## 2022-23 Data (Repeat of Above)
+```{r}
+#use this for team and players
+#parse and recombine
+all_stats_2023 <- teams_players_stats(seasons = 2023, types = c("player", "team"), tables = c("general"), season_types = "Regular Season", measures = c("Base", "Advanced"), modes = "Per48")
+
+basic_player_2023 <- all_stats_2023[[7]][[1]] %>%
+    mutate(yearSeason = 2023)
+
+adv_player_2023 <- all_stats_2023[[7]][[3]] %>%
+    mutate(yearSeason = 2023)
+
+more_adv_player_2023 <- bref_players_stats(seasons = 2023, tables = c("advanced"))
+more_adv_player_2023 <- more_adv_player_2023 %>%
+  select(namePlayer, yearSeason, groupPosition, slugPosition, ratioPER, pctTOV, ratioOWS, ratioDWS, ratioWS, ratioOBPM:ratioVORP)
+
+
+basic_team_2023 <- all_stats_2023[[7]][[2]] %>%
+    mutate(yearSeason = 2023)
+
+adv_team_2023 <- all_stats_2023[[7]][[4]] %>%
+    mutate(yearSeason = 2023)
+
+#select only relevant columns
+basic_player_2023 <- basic_player_2023 %>%
+  select(typeMeasure, namePlayer:fptsNBAActual, rankFTM:fptsRank, yearSeason)
+
+adv_player_2023 <- adv_player_2023 %>%
+  select(typeMeasure, namePlayer, pctAST:pctFG, pctASTRank:pctUSGRank, ortgE:ortg, drtgE:drtg, netrtgE:netrtg, ratioASTtoTO:pace, ratioPIE, rankORTGE:ortgRank, rankDRTGE:drtgRank, rankNTRGE:netrtgRank, ratioASTtoTORank:yearSeason)
+
+basic_team_2023 <- basic_team_2023 %>%
+  select(typeMeasure, nameTeam:yearSeason)
+
+adv_team_2023 <- adv_team_2023 %>%
+  select(typeMeasure, nameTeam, pctAST:pctTS, pctASTRank:pctTSRank, ortgE:pace, ratioPIE, ortgRank:yearSeason)
+
+#combining 
+all_player_2023 <- left_join(basic_player_2023, adv_player_2023, by=c("namePlayer", "yearSeason"))
+all_player_2023 <- left_join(all_player_2023, more_adv_player_2023, by=c("namePlayer", "yearSeason"))
+all_player_2023 <- all_player_2023 %>%
+  select(yearSeason, namePlayer, everything())
+
+all_team_2023 <- left_join(basic_team_2023, adv_team_2023, by=c("nameTeam", "yearSeason"))
+all_team_2023 <- all_team_2023 %>%
+  select(yearSeason, nameTeam, everything())
+
+
+#salary data (don't use)
+current_salaries <- hoopshype_salaries(all_teams=T)
+
+current_salaries <- current_salaries %>%
+  filter(slugSeason == "2022-23") %>%
+  mutate(Salary = amountContract) %>%
+  select(namePlayer, Salary)
+
+#salaries from 2022-23 season (use)
+  webpage <- read_html("https://hoopshype.com/salaries/players/")
+  current_salaries <- webpage %>%
+    html_table() %>%
+    .[[1]] %>%
+    setNames(.[1, ]) %>% #Since column names are in 1st row
+    slice(-1) %>%        #Remove 1st row
+    dplyr::select(-1) %>%   #Remove 1st column
+    rename("namePlayer" = Player)
+  
+  colnames(current_salaries)[2] = "Salary"
+  
+  current_salaries <- current_salaries %>%
+    mutate(yearSeason = 2023) %>%
+    dplyr::select(namePlayer, Salary)
+  
+current_salaries <- current_salaries %>%
+  mutate(Salary = (substr(Salary, 2, nchar(Salary))))
+
+current_salaries$Salary <- as.numeric(gsub(",","", current_salaries$Salary))
+
+all_player_2023 <- all_player_2023 %>%
+  mutate(namePlayer2 = str_remove_all(namePlayer, "\\."))
+
+player_salary_2023 <- left_join(all_player_2023, current_salaries, by=c("namePlayer2" = "namePlayer"))
+
+player_salary_2023 <- player_salary_2023 %>% filter(!is.na(Salary))
+```
+
+# Team Eval: Sixers 2022-23
+```{r}
+# importing logos
+logos <- load_nba_schedule(seasons = 2018)
+logos <- logos %>% group_by(home_logo) %>%
+  filter(row_number()==1) %>%
+  select(home_name, home_abbreviation, home_logo, home_color, home_alternate_color, home_display_name)
+
+all_team_2023 <- left_join(all_team_2023, logos, by=c("nameTeam"="home_display_name"))
+
+# plots for each vs win pct
+library(ggrepel)
+library(ggimage)
+all_team_2023 %>% 
+  mutate(selected_team = ifelse(home_abbreviation=="PHI", 0.9, 0.3)) %>% 
+  ggplot(aes(pctEFG, pctWins)) +
+  geom_vline(xintercept = mean(all_team_2023$pctEFG), color="red", linetype="dashed") +
+  geom_hline(yintercept = mean(all_team_2023$pctWins), color="red", linetype="dashed") +
+  scale_colour_gradient(low = "white", high = "wheat") +
+  geom_point(aes(alpha = selected_team, color = selected_team), size = 12, show.legend = F) +
+  geom_image(aes(image=home_logo)) +
+  labs(
+    x = "Effective FG%",
+    y = "Winning Percentage",
+    title = "Winning Percentage vs Effective FG%") +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "panel"
+  ) 
+
+all_team_2023 %>% 
+  mutate(selected_team = ifelse(home_abbreviation=="PHI", 0.9, 0.3)) %>% 
+  ggplot(aes(pctFG2, pctFG3)) +
+  geom_vline(xintercept = mean(all_team_2023$pctFG2), color="red", linetype="dashed") +
+  geom_hline(yintercept = mean(all_team_2023$pctFG3), color="red", linetype="dashed") +
+  scale_colour_gradient(low = "white", high = "wheat") +
+  geom_point(aes(alpha = selected_team, color = selected_team), size = 12, show.legend = F) +
+  geom_image(aes(image=home_logo)) +
+  labs(
+    x = "2 PT %",
+    y = "3 PT %",
+    title = "Shooting Efficiency from 2-Point and 3-Point Range") +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "panel"
+  ) 
+
+all_team_2023 %>% 
+  mutate(selected_team = ifelse(home_abbreviation=="PHI", 0.9, 0.3)) %>% 
+  ggplot(aes(tov, pctWins)) +
+  geom_vline(xintercept = mean(all_team_2023$tov), color="red", linetype="dashed") +
+  geom_hline(yintercept = mean(all_team_2023$pctWins), color="red", linetype="dashed") +
+  scale_colour_gradient(low = "white", high = "wheat") +
+  geom_point(aes(alpha = selected_team, color = selected_team), size = 12, show.legend = F) +
+  geom_image(aes(image=home_logo)) +
+  labs(
+    x = "TOV / 48 Minutes",
+    y = "Win %",
+    title = "Relationship between Winning and Turnovers") +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "panel"
+  ) 
+
+all_team_2023 %>% 
+  mutate(selected_team = ifelse(home_abbreviation=="PHI", 0.9, 0.3)) %>% 
+  ggplot(aes(pctTREB, pctWins)) +
+  geom_point() +
+  geom_vline(xintercept = mean(all_team_2023$pctTREB), color="red", linetype="dashed") +
+  geom_hline(yintercept = mean(all_team_2023$pctWins), color="red", linetype="dashed") +
+  scale_colour_gradient(low = "white", high = "wheat") +
+  geom_point(aes(alpha = selected_team, color = selected_team), size = 12, show.legend = F) +
+  geom_image(aes(image=home_logo)) +
+  labs(
+    x = "TREB %",
+    y = "Win %",
+    title = "Relationship between Winning and Total Rebounding Percentage") +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "panel"
+  ) 
+
+#breaking down pctTREB
+all_team_2023 %>% 
+  mutate(selected_team = ifelse(home_abbreviation=="PHI", 0.9, 0.3)) %>% 
+  ggplot(aes(pctDREB, pctOREB)) +
+  geom_point() +
+  geom_vline(xintercept = mean(all_team_2023$pctDREB), color="red", linetype="dashed") +
+  geom_hline(yintercept = mean(all_team_2023$pctOREB), color="red", linetype="dashed") +
+  scale_colour_gradient(low = "white", high = "wheat") +
+  geom_point(aes(alpha = selected_team, color = selected_team), size = 12, show.legend = F) +
+  geom_image(aes(image=home_logo)) +
+  labs(
+    x = "DREB %",
+    y = "OREB %",
+    title = "Breaking Down Rebounding Percentage") +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "panel"
+  ) 
+
+all_team_2023 %>% 
+  mutate(selected_team = ifelse(home_abbreviation=="PHI", 0.9, 0.3)) %>% 
+  ggplot(aes(pctFT, pctWins)) +
+  geom_point() +
+  geom_vline(xintercept = mean(all_team_2023$pctFT), color="red", linetype="dashed") +
+  geom_hline(yintercept = mean(all_team_2023$pctWins), color="red", linetype="dashed") +
+  scale_colour_gradient(low = "white", high = "wheat") +
+  geom_point(aes(alpha = selected_team, color = selected_team), size = 12, show.legend = F) +
+  geom_image(aes(image=home_logo)) +
+  labs(
+    x = "FT %",
+    y = "Winning %",
+    title = "Relationship between Winning and Free Throw Percentage") +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "panel"
+  ) 
+
+all_team_2023 %>%
+  group_by(nameTeam) %>%
+  summarise(pctFT, fta) %>%
+  arrange(-fta)
+
+
+# creating four factor score 
+team_scores_2023 <- all_team_2023 %>%
+  group_by(yearSeason) %>%
+  mutate(pctEFG_score = pnorm(pctEFG, mean = mean(pctEFG), sd = sd(pctFG)),
+         tov_score = pnorm(tov, mean = mean(tov), sd = sd(tov)),
+         pctTREB_score = pnorm(pctTREB, mean = mean(pctTREB), sd = sd(pctTREB)),
+         pctFT_score = pnorm(pctFT, mean = mean(pctFT), sd = sd(pctFT)))
+
+# weights
+w1 <- .4
+w2 <- .25
+w3 <- .2
+w4 <- .15
+
+team_scores_2023 <- team_scores_2023 %>%
+  mutate(Avg_Score = w1 * pctEFG_score + w2 * tov_score + 
+           w3 * pctTREB_score + w4 * pctFT_score)
+
+#strong correlation
+cor(team_scores_2023$Avg_Score, team_scores_2023$pctWins)
+
+team_scores_2023_2 <- left_join(team_scores_2023, logos, by=c("nameTeam"="home_display_name"))
+
+team_scores_2023_2 %>% 
+  mutate(selected_team = ifelse(home_abbreviation=="PHI", 0.9, 0.3)) %>% 
+  ggplot(aes(Avg_Score, pctWins)) +
+  geom_vline(xintercept = mean(team_scores_2023$Avg_Score), color="red", linetype="dashed") +
+  geom_hline(yintercept = mean(team_scores_2023$pctWins), color="red", linetype="dashed") +
+  scale_colour_gradient(low = "white", high = "wheat") +
+  geom_point(aes(alpha = selected_team, color = selected_team), size = 12, show.legend = F) +
+  geom_image(aes(image=home_logo)) +
+  labs(
+    x = "Four Factor Score",
+    y = "Winning Percentage",
+    title = "Winning Percentage vs Four Factor Score") +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "panel"
+  ) 
+
+#also suggest looking at offensive and defensive rating as overall barometer for how the team is performing
+#maybe rolling average for 2023 and animate it?
+all_team_2023 %>% 
+  ggplot(aes(ortg, pctWins)) +
+  geom_point()  +
+  geom_label_repel(aes(label = nameTeam), data = filter(all_team_2023, nameTeam=="Philadelphia 76ers"), box.padding = 1)
+
+all_team_2023 %>% 
+  ggplot(aes(drtg, pctWins)) +
+  geom_point() +
+  geom_label_repel(aes(label = nameTeam), data = filter(all_team_2023, nameTeam=="Philadelphia 76ers"), box.padding = 1)
+
+all_team_2023 %>% 
+  ggplot(aes(drtg, ortg)) +
+  geom_point() +
+  geom_label_repel(aes(label = nameTeam), data = filter(all_team_2023, nameTeam=="Philadelphia 76ers"), box.padding = 1)
+
+#basic team summary
+all_team_2023 %>%
+  group_by(nameTeam) %>%
+  arrange(-pctTREB) %>%
+  ungroup() %>%
+  summarise(nameTeam, pctTREB, rank = row_number())
+```
+# Player Eval: 2023 Sixers
+```{r}
+player_salary_2023 %>%
+  filter(slugTeam=="PHI") %>%
+  arrange(-tov) %>%
+  summarise(namePlayer, tov, pctUSG)
+
+player_salary_2023 %>%
+  summarise(namePlayer, percentile = pnorm(tov,mean = mean(tov), sd = sd(tov))) %>%
+  arrange(-percentile)
+  
+
+#getting defensive stats
+defense_2023 <- teams_players_stats(seasons = 2023, types = c("player"), tables = c("defense"), season_types = "Regular Season", measures = c("Base", "Advanced"), modes = "PerGame", defenses = c("3 Pointers", "Less Than 6Ft"))
+
+defense_3pt_2023 <- defense_2023[[7]][[1]] %>%
+    mutate(yearSeason = 2023) %>%
+    dplyr::select(namePlayer, yearSeason, pctFG3)
+
+defense_LT6_2023 <- defense_2023[[7]][[3]] %>%
+    mutate(yearSeason = 2023) %>%
+    dplyr::select(namePlayer, yearSeason, LT_06_PCT)
+
+defense_full_2023 <- left_join(defense_LT6_2023, defense_3pt_2023, by=c("namePlayer", "yearSeason"))
+
+defense_full_2023 <- defense_full_2023 %>%
+  mutate(namePlayer2 = str_remove_all(namePlayer, "\\."))
+
+defense_full_2023 <- left_join(defense_full_2023, player_salary_2023, by=c("namePlayer2", "yearSeason"))
+
+defense_centers_2023 <- defense_full_2023 %>%
+  filter(!is.na(groupPosition), !is.na(pctFG3.x)) %>%
+  filter(groupPosition == "C") %>%
+  mutate(EFG_norm = pnorm(pts, mean = mean(pts), sd = sd(pts)),
+            tov_norm = 1- pnorm(tov, mean = mean(tov), sd = sd(tov)),
+            pct_treb_norm = pnorm(pctOREB, mean = mean(pctOREB), sd = sd(pctOREB)),
+            FT_norm = pnorm(pctFT, mean = mean(pctFT), sd = sd(pctFT)),
+         pct_2pt_norm = pnorm(pctFG2, mean = mean(pctFG2), sd = sd(pctFG2))) %>%
+  mutate(LT6_norm = 1- pnorm(LT_06_PCT, mean = mean(LT_06_PCT), sd = sd(LT_06_PCT)),
+            pctFG3_norm = 1- pnorm(pctFG3.x, mean = mean(pctFG3.x), sd = sd(pctFG3.x)),
+            stl_norm = pnorm(stl, mean = mean(stl), sd = sd(stl)),
+            blk_norm = pnorm(blk, mean = mean(blk), sd = sd(blk)))
+
+defense_forwards_2023 <- defense_full_2023 %>%
+  filter(!is.na(groupPosition), !is.na(pctFG3.x)) %>%
+  filter(groupPosition == "F") %>%
+  mutate(EFG_norm = pnorm(pts, mean = mean(pts), sd = sd(pts)),
+            tov_norm = 1- pnorm(tov, mean = mean(tov), sd = sd(tov)),
+            pct_treb_norm = pnorm(pctOREB, mean = mean(pctOREB), sd = sd(pctOREB)),
+            FT_norm = pnorm(pctFT, mean = mean(pctFT), sd = sd(pctFT)),
+         pct_2pt_norm = pnorm(pctFG2, mean = mean(pctFG2), sd = sd(pctFG2))) %>%
+  mutate(LT6_norm = 1- pnorm(LT_06_PCT, mean = mean(LT_06_PCT), sd = sd(LT_06_PCT)),
+            pctFG3_norm = 1- pnorm(pctFG3.x, mean = mean(pctFG3.x), sd = sd(pctFG3.x)),
+            stl_norm = pnorm(stl, mean = mean(stl), sd = sd(stl)),
+            blk_norm = pnorm(blk, mean = mean(blk), sd = sd(blk)))
+
+defense_guard_2023 <- defense_full_2023 %>%
+  filter(!is.na(groupPosition), !is.na(pctFG3.x)) %>%
+  filter(groupPosition == "G") %>%
+  mutate(EFG_norm = pnorm(pts, mean = mean(pts), sd = sd(pts)),
+            tov_norm = 1- pnorm(tov, mean = mean(tov), sd = sd(tov)),
+            pct_treb_norm = pnorm(pctOREB, mean = mean(pctOREB), sd = sd(pctOREB)),
+            FT_norm = pnorm(pctFT, mean = mean(pctFT), sd = sd(pctFT)),
+         pct_2pt_norm = pnorm(pctFG2, mean = mean(pctFG2), sd = sd(pctFG2))) %>%
+  mutate(LT6_norm = 1- pnorm(LT_06_PCT, mean = mean(LT_06_PCT), sd = sd(LT_06_PCT)),
+            pctFG3_norm = 1- pnorm(pctFG3.x, mean = mean(pctFG3.x), sd = sd(pctFG3.x)),
+            stl_norm = pnorm(stl, mean = mean(stl), sd = sd(stl)),
+            blk_norm = pnorm(blk, mean = mean(blk), sd = sd(blk)))
+
+defense_full_2023 <- rbind(defense_centers_2023, defense_forwards_2023, defense_guard_2023)
+
+defense_full_2023 <- defense_full_2023 %>%
+  ungroup() %>%
+  mutate(off_score = case_when(groupPosition == "C" ~ 0.5855200 * EFG_norm + 0.04441004*tov_norm + 0.12891885*pct_treb_norm + 0.2411511*FT_norm,
+                               groupPosition == "F" ~ 0.6059645 * EFG_norm + 0.01934863*tov_norm + 0.07662662*pct_treb_norm + 0.2980602*FT_norm,
+                               groupPosition == "G" ~ 0.5410904 * EFG_norm + 0.11505038*tov_norm + 0.04282659*pct_treb_norm + 0.3010326*FT_norm),
+         
+         def_score = case_when(groupPosition == "C" ~ 0.4334391 * LT6_norm + 0.1255157*pctFG3_norm +  0.4410451*blk_norm,
+                               groupPosition == "F" ~ 0.1820329 * LT6_norm + 0.08735832*pctFG3_norm + 0.4517835*stl_norm + 0.2788252*blk_norm,
+                               groupPosition == "G" ~ 0.1525250 * LT6_norm + 0.06109497*pctFG3_norm + 0.5000073*stl_norm + 0.2863728*blk_norm),
+         
+         player_score = off_score + def_score)
+
+centers_2023 <- defense_full_2023 %>%
+  filter(groupPosition == "C", minutes > 1094.9800000) %>%
+  arrange(-player_score) %>%
+  mutate(player_score_rank = row_number()) %>%
+  dplyr::select(namePlayer, player_score_rank, slugTeam, EFG_norm:player_score)
+
+centers_2023 %>% filter(slugTeam == "PHI")
+
+defense_full_2023 %>%
+  filter(groupPosition == "F", minutes > 1094.9800000) %>%
+  arrange(-player_score) %>%
+  mutate(player_score_rank = row_number()) %>%
+  dplyr::select(namePlayer, player_score_rank, slugTeam, EFG_norm:player_score) %>%
+  filter(slugTeam == "PHI")
+
+defense_full_2023 %>%
+  filter(groupPosition == "G", minutes > 1094.9800000) %>%
+  arrange(-player_score) %>%
+  mutate(player_score_rank = row_number()) %>%
+  dplyr::select(namePlayer, slugTeam, player_score_rank, EFG_norm:player_score) %>%
+  filter(slugTeam == "PHI")
+
+defense_full_2023 %>%
+  filter(minutes > 1094.9800000) %>%
+  filter(slugTeam == "PHI") %>%
+  arrange(-player_score) %>%
+  dplyr::select(namePlayer, yearSeason, EFG_norm:player_score, minutes)
+
+defense_full_2023 %>%
+  filter(minutes > 1100) %>%
+  filter(slugTeam == "PHI") %>%
+  arrange(-off_score) %>%
+  dplyr::select(namePlayer, yearSeason, EFG_norm:player_score, minutes)
+
+defense_full_2023 %>%
+  filter(minutes > 1094.9800000) %>%
+  filter(slugTeam == "PHI") %>%
+  arrange(-def_score) %>%
+  dplyr::select(namePlayer, yearSeason, EFG_norm:player_score, minutes)
+
+defense_full_2023 <- defense_full_2023 %>%
+  rename("pts_norm" = EFG_norm,
+         "pct_oreb_norm" = pct_treb_norm,
+         "namePlayer" = namePlayer.x) %>%
+  dplyr::select(-namePlayer.y)
+
+
+defense_full_2023 <- defense_full_2023 %>%
+  rename("EFG_norm" = pts_norm,
+         "pct_treb_norm" = pct_oreb_norm)
+write.csv(defense_full_2023, "Player_Stats_2023.csv")
+
+
+defense_full_2023 %>% filter(namePlayer.x!=namePlayer.y)
+```
+
+
+# Salary Eval: 2023 Sixers
+```{r}
+library(modelr)
+library(Metrics)
+
+player_salary_2023_pred <- player_salary_2023 %>%
+  filter(!is.na(ratioVORP)) %>%
+  group_by(namePlayer) %>%
+  mutate(Salary = sum(Salary)) %>%
+  filter(row_number()==1) %>%
+  add_predictions(salary_xgboost) %>%
+  add_residuals(salary_xgboost)
+
+player_salary_2023_pred <- defense_full_2023 %>%
+  filter(!is.na(ratioVORP)) %>%
+  group_by(namePlayer) %>%
+  mutate(Salary = sum(Salary)) %>%
+  filter(row_number()==1) %>%
+  add_predictions(salary_xgboost) %>%
+  add_residuals(salary_xgboost)
+
+summary(forward_select_model)
+rmse(filter(player_salary_2023_pred, !is.na(Salary) & !is.na(ratioVORP))$Salary, filter(player_salary_2023_pred, !is.na(Salary) & !is.na(ratioVORP))$pred)
+
+sd(player_salary_2023_pred$Salary)
+
+plot(forward_select_model)
+
+player_salary_2023_pred %>% 
+  #filter(Salary < 10000000) %>%
+  ggplot(aes(Salary, pred))+
+  geom_point() +
+  geom_abline(slope=1)
+
+#which sixers are under and over performing salary
+#positive residual is bad: actual salary > expected salary
+options(scipen = 999)
+player_salary_2023_pred %>%
+  filter(slugTeam == "PHI") %>%
+  dplyr::select(namePlayer, Salary, pred, resid, ratioVORP) %>%
+  arrange(-resid) %>%
+  ggplot(aes(Salary, pred)) +
+  geom_point() +
+  geom_label_repel(aes(label=namePlayer), data = player_salary_2023_pred %>% filter(slugTeam == "PHI", abs(resid)>7000000), box.padding = .5) +
+  geom_abline(slope=1, linetype="dashed", color="red") +
+  labs(
+    x = "Salary",
+    y = "Expected Salary",
+    title = "Relationship between Expected and Actual Salary",
+    subtitle = "2022-23 Philadelphia 76ers") +
+  scale_y_continuous(labels = scales::label_number_si()) +
+  scale_x_continuous(labels = scales::label_number_si()) +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "panel"
+  ) 
+
+
+
+#whole league or just sixers in table form
+player_salary_2023_pred %>%
+  filter(slugTeam == "PHI") %>%
+  dplyr::select(namePlayer, slugPosition, Salary, resid, ratioVORP, pts, minutesRank, pctOREBRank) %>%
+  arrange(resid)
+
+#ranking teams by sum of residuals (PHI is 10th best in league at creating value)
+#above average but room for improvement
+player_salary_2023_pred %>%
+  group_by(slugTeam) %>%
+  summarise(sum_resid = sum(resid, na.rm = T)) %>%
+  arrange(sum_resid) %>%
+  mutate(rank = row_number())
+
+player_salary_2023_pred %>%
+  #filter(slugTeam == "PHI") %>%
+  dplyr::select(namePlayer, slugPosition, Salary, pred, resid, pctTREBRank, pctOREBRank, pctDREBRank, agePlayer, ratioVORP, pts, minutesRank) %>%
+  filter(slugPosition == "PF", resid<0, pctOREBRank<130) %>%
+  arrange(resid, pctOREBRank)
+
+
+player_salary_2023_pred %>%
+  #filter(slugTeam == "PHI") %>%
+  dplyr::select(namePlayer, Salary, pred, resid, pctOREB, player_score, slugPosition) %>%
+  filter(slugPosition == "SF", resid<0, pctOREB > .05) %>%
+  arrange(resid, pctOREB)
+#transition D and rebounding are problems
+#possibly target stretch four with good oreb (bobby portis, jarred vanderbilt)
+#cam johnson
+#lauri markkanen
+#torrey craig 
+
+library(plotly)
+p <- player_salary_2023_pred %>%
+  filter(slugPosition %in% c("SF", "PF"), resid<0) %>%
+  ggplot(aes(pctOREB, player_score, text = paste(namePlayer, round(resid,0), round(player_score,2)))) +
+  geom_point()
+
+ggplotly(p, tooltip = "text")
+
+# player score based on salary (don't use, doesn't fit or relate well)
+defense_full %>%
+  ggplot(aes(y=player_score, x=Salary)) + 
+  geom_point() +
+    labs(
+    x = "Salary",
+    y = "Player Score",
+    title = "Relationship between Player Score and Salary") +
+  scale_y_continuous(labels = scales::label_number_si()) +
+  scale_x_continuous(labels = scales::label_number_si()) +
+  theme_minimal() +
+  theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    plot.title.position = "panel"
+  ) 
+
+player_score_lm <- lm(player_score ~ Salary, data=defense_full)
+summary(player_score_lm)
+plot(player_score_lm)
+plot(player_score_lm$fitted.values, defense_full$player_score)
+
+defense_full_pred <- defense_full %>%
+  add_predictions(player_score_lm)
+
+
+defense_full_pred %>%
+  filter(minutesRank < 200) %>%
+  ggplot(aes(player_score, pred)) +
+  geom_point()
+
+
+player_salary_2023_pred %>%
+  filter(minutes > 1100) %>%
+  group_by(slugTeam) %>%
+  summarise(player = mean(player_score), off = mean(off_score), def = mean(def_score)) %>%
+  arrange(-player)
+
+player_salary_2023_pred %>%
+  arrange(slugTeam, -minutes) %>%
+  group_by(slugTeam) %>%
+  filter(row_number() <= 9) %>%
+  summarise(player = mean(player_score), off = mean(off_score), def = mean(def_score), n()) %>%
+  arrange(-player)
+
+player_salary_2023_pred %>%
+  group_by(slugTeam) %>%
+  filter(minutes > 1100) %>%
+  summarise(player = mean(player_score), off = mean(off_score), def = mean(def_score), n()) %>%
+  arrange(-def)
+```
+
